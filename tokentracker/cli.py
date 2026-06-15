@@ -48,16 +48,31 @@ def ingest(
         "all", "--source",
         help="取り込むソース: all / claude_code / codex / cline",
     ),
+    full: bool = typer.Option(
+        False, "--full",
+        help="全ファイルを再走査（既定は前回から変更/新規のファイルだけの増分取り込み）。"
+             "単価表を更新して既存ログのコストを再計算したいときに使う。",
+    ),
 ) -> None:
-    """ローカルログを取り込む（Claude Code / Codex / Cline、既定の保存場所を走査）。"""
+    """ローカルログを取り込む（Claude Code / Codex / Cline、既定の保存場所を走査）。
+
+    既定は増分取り込み: ``ingest_state`` に記録した size/mtime と一致する未変更ファイルは
+    開かずにスキップするため、繰り返し実行しても新規/変更分だけを収集する。
+    """
     if source != "all" and source not in INGESTORS:
         raise typer.BadParameter(f"--source は all/{'/'.join(INGESTORS)} のいずれか")
     sources = None if source == "all" else [source]
     conn = _open(db_path)
-    per_source = ingest_all(conn, sources=sources)
-    total = conn.execute("SELECT COUNT(*) FROM usage_event").fetchone()[0]
+    before = db.count_events(conn)
+    per_source = ingest_all(conn, sources=sources, incremental=not full)
+    total = db.count_events(conn)
+    added = total - before
     detail = " / ".join(f"{s}:{n}" for s, n in per_source.items())
-    console.print(f"[green]取り込み完了[/]: {detail} / DB 合計 {total} 件 -> {db_path}")
+    mode = "全件再走査" if full else "増分"
+    console.print(
+        f"[green]取り込み完了[/]({mode}): 新規 {added} 件 / DB 合計 {total} 件"
+        f"  [dim]処理 {detail}[/] -> {db_path}"
+    )
 
 
 @app.command()

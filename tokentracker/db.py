@@ -99,3 +99,35 @@ def upsert_events(conn: sqlite3.Connection, events: list[UsageEvent]) -> int:
     conn.executemany(sql, rows)
     conn.commit()
     return len(rows)
+
+
+def count_events(conn: sqlite3.Connection) -> int:
+    """``usage_event`` の行数。取り込み前後の差分で「新規 N 件」を出すのに使う。"""
+    return conn.execute("SELECT COUNT(*) FROM usage_event").fetchone()[0]
+
+
+def load_ingest_state(conn: sqlite3.Connection) -> dict[str, tuple[int, float]]:
+    """取り込み済みファイルの状態を ``{file_path: (size, mtime)}`` で返す。
+
+    増分取り込みで「未変更ファイル（size と mtime が一致）」をスキップ判定するのに使う。
+    """
+    rows = conn.execute("SELECT file_path, size, mtime FROM ingest_state").fetchall()
+    return {r["file_path"]: (r["size"], r["mtime"]) for r in rows}
+
+
+def update_ingest_state(
+    conn: sqlite3.Connection,
+    file_path: str,
+    size: int,
+    mtime: float,
+    last_message_id: str | None = None,
+) -> None:
+    """ファイルの取り込み状態を UPSERT する（次回以降のスキップ判定に使う）。"""
+    conn.execute(
+        "INSERT INTO ingest_state (file_path, size, mtime, last_message_id) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(file_path) DO UPDATE SET "
+        "size=excluded.size, mtime=excluded.mtime, last_message_id=excluded.last_message_id",
+        (file_path, size, mtime, last_message_id),
+    )
+    conn.commit()
