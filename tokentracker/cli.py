@@ -114,12 +114,79 @@ def pricing(
         console.print("エイリアス: " + ", ".join(f"{k}→{v}" for k, v in book.aliases.items()))
 
 
+@app.command()
+def schema(
+    as_json: bool = typer.Option(False, "--json", help="機械可読な JSON で全定義を出力"),
+    recipes: bool = typer.Option(False, "--recipes", help="分析レシピ（名前＋SQL）のみ出力"),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db", help="指定時のみ DB のライブ統計（行数・モデル数・期間）を併記",
+    ),
+) -> None:
+    """DB スキーマ定義と分析レシピを表示（最適化エージェント向け、DB 非依存）。"""
+    from tokentracker.schema import SCHEMA_DEFINITION
+
+    if as_json:
+        console.print_json(jsonlib.dumps(SCHEMA_DEFINITION, ensure_ascii=False))
+        return
+
+    if recipes:
+        for name, rec in SCHEMA_DEFINITION["recipes"].items():
+            console.print(f"[cyan]{name}[/]: {rec['description']}")
+            console.print(f"  [dim]{rec['sql']}[/]")
+        return
+
+    for tname, tdef in SCHEMA_DEFINITION["tables"].items():
+        table = Table(title=f"{tname} — {tdef['grain']}")
+        table.add_column("column", overflow="fold")
+        table.add_column("type")
+        table.add_column("null")
+        table.add_column("意味", overflow="fold")
+        for col in tdef["columns"]:
+            table.add_row(
+                col["name"], col.get("type", ""),
+                "" if col.get("nullable", True) else "NOT NULL",
+                col.get("semantics", ""),
+            )
+        console.print(table)
+    console.print("分析レシピは [cyan]tokentracker schema --recipes[/]、"
+                  "機械可読版は [cyan]--json[/]。詳細は docs/db_schema.md。")
+
+    if db_path is not None:
+        try:
+            conn = _open(db_path)
+            n = conn.execute("SELECT COUNT(*) FROM usage_event").fetchone()[0]
+            models = conn.execute(
+                "SELECT COUNT(DISTINCT model) FROM usage_event"
+            ).fetchone()[0]
+            span = conn.execute(
+                "SELECT MIN(timestamp_utc), MAX(timestamp_utc) FROM usage_event"
+            ).fetchone()
+            console.print(
+                f"[green]DB ライブ統計[/]: {n} 行 / モデル {models} 種 / "
+                f"期間 {span[0] or '-'} 〜 {span[1] or '-'}"
+            )
+        except Exception as e:  # DB が無い/壊れていても静的出力は成立させる。
+            console.print(f"[yellow]DB 統計を取得できませんでした: {e}[/]")
+
+
 def _probe(model: str):
     """単価判定用の最小 UsageEvent（compute_cost が None かどうかだけを見る）。"""
     from tokentracker.models import UsageEvent
 
     return UsageEvent(source="", message_id="", session_id="", model=model,
                       timestamp_utc="", input_tokens=1)
+
+
+def _fmt_ratio(x: float | None) -> str:
+    return f"{x:.2f}" if x is not None else "-"
+
+
+def _fmt_pct(x: float | None) -> str:
+    return f"{x * 100:.0f}%" if x is not None else "-"
+
+
+def _fmt_cost(x: float | None) -> str:
+    return f"{x:.4f}" if x is not None else "-"
 
 
 def _render(
@@ -152,8 +219,11 @@ def _render(
     table.add_column("cache_r", justify="right")
     table.add_column("判明コスト$", justify="right")
     table.add_column("未割当tok", justify="right")
+    table.add_column("out/in", justify="right")
+    table.add_column("cache率", justify="right")
+    table.add_column("$/件", justify="right")
 
-    tot = {"input": 0, "output": 0, "cw": 0, "cr": 0, "cost": 0.0, "un": 0}
+    tot = {"input": 0, "output": 0, "cw": 0, "cr": 0, "cost": 0.0, "un": 0, "events": 0}
     for r in rows:
         table.add_row(
             str(r["key"]),
@@ -163,6 +233,9 @@ def _render(
             f"{r['cache_read_tokens']:,}",
             f"{r['known_cost_usd']:.4f}",
             f"{r['unallocated_tokens']:,}" if r["unallocated_tokens"] else "-",
+            _fmt_ratio(r["output_input_ratio"]),
+            _fmt_pct(r["cache_hit_ratio"]),
+            _fmt_cost(r["cost_per_event"]),
         )
         tot["input"] += r["input_tokens"]
         tot["output"] += r["output_tokens"]
@@ -170,10 +243,16 @@ def _render(
         tot["cr"] += r["cache_read_tokens"]
         tot["cost"] += r["known_cost_usd"]
         tot["un"] += r["unallocated_tokens"]
+        tot["events"] += r["events"]
+    # 合計行の比率は加重（合計値から再計算。比率の平均ではない）。
+    tot_oi = tot["output"] / tot["input"] if tot["input"] > 0 else None
+    tot_ch = tot["cr"] / (tot["input"] + tot["cr"]) if (tot["input"] + tot["cr"]) > 0 else None
+    tot_cpe = tot["cost"] / tot["events"] if tot["events"] > 0 else None
     table.add_section()
     table.add_row(
         "合計", f"{tot['input']:,}", f"{tot['output']:,}", f"{tot['cw']:,}",
         f"{tot['cr']:,}", f"{tot['cost']:.4f}", f"{tot['un']:,}" if tot["un"] else "-",
+        _fmt_ratio(tot_oi), _fmt_pct(tot_ch), _fmt_cost(tot_cpe),
         style="bold",
     )
     console.print(table)

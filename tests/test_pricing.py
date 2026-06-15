@@ -133,3 +133,14 @@ def test_synthetic_model_is_zero_not_unallocated():
         timestamp_utc="2026-06-14T02:05:00.000Z",
     )
     assert book.compute_cost(ev) == 0.0
+
+
+def test_cache_savings():
+    """キャッシュ読取の節約額 = cache_read × (input − cache_read) / 1e6。単価無は None。"""
+    book = _book()  # sonnet: input 3.0 / cache_read 0.3
+    # 1M cache_read → (3.0 − 0.3) = 2.7 USD 節約。
+    assert round(book.cache_savings("claude-sonnet-4-6", 1_000_000), 4) == 2.7
+    # 日付サフィックス付きIDも基底に解決される。
+    assert round(book.cache_savings("claude-sonnet-4-6-20260101", 1_000_000), 4) == 2.7
+    # 単価未登録モデルは None。
+    assert book.cache_savings("some-foundry-deployment", 1_000_000) is None

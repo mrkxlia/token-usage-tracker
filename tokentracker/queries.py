@@ -38,6 +38,24 @@ def _row_key(row: sqlite3.Row, dimension: str, tz: str) -> str:
     return row[column] if row[column] is not None else "(none)"
 
 
+def _finalize_ratios(b: dict) -> None:
+    """集計済みバケットに派生指標を付与する（破壊的に b を更新）。
+
+    ゼロ除算は None を返し、表示層で "-" 表示できるようにする。
+    - output_input_ratio = output_tokens / input_tokens
+    - cache_hit_ratio    = cache_read_tokens / (input_tokens + cache_read_tokens)
+        キャッシュ「書込(cache_creation)」は一時コストであり read/fresh のトレードオフ
+        ではないため分母に含めない。値域 [0,1]。この定義は CLI help・docs/db_schema.md・
+        schema.py と同一表現で統一する。
+    - cost_per_event     = known_cost_usd / events
+    """
+    inp = b["input_tokens"]
+    cr = b["cache_read_tokens"]
+    b["output_input_ratio"] = (b["output_tokens"] / inp) if inp > 0 else None
+    b["cache_hit_ratio"] = (cr / (inp + cr)) if (inp + cr) > 0 else None
+    b["cost_per_event"] = (b["known_cost_usd"] / b["events"]) if b["events"] > 0 else None
+
+
 def summary(
     conn: sqlite3.Connection,
     dimension: str,
@@ -51,7 +69,8 @@ def summary(
 
     各行: key / input_tokens / output_tokens / cache_creation_tokens / cache_read_tokens /
     known_cost_usd(単価判明分の合計) / unallocated_tokens(単価不明分のトークン) /
-    unallocated_events(単価不明件数) / events。
+    unallocated_events(単価不明件数) / events /
+    output_input_ratio / cache_hit_ratio / cost_per_event(派生指標、ゼロ除算は None)。
     """
     rows = conn.execute("SELECT * FROM usage_event").fetchall()
     buckets: dict[str, dict] = {}
@@ -90,4 +109,7 @@ def summary(
             b["unallocated_events"] += 1
         else:
             b["known_cost_usd"] += row["cost_usd"]
+    # 集計完了後に派生指標を付与（既存 accumulator は変更しない）。
+    for b in buckets.values():
+        _finalize_ratios(b)
     return sorted(buckets.values(), key=lambda r: r["key"])

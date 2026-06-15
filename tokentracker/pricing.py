@@ -70,6 +70,18 @@ class PriceBook:
         aliases = self.aliases or {}
         return aliases.get(model, model)
 
+    def _rate_for(self, model: str) -> dict[str, float] | None:
+        """モデル名→単価 dict を引く。未知モデルは None。
+
+        alias 解決 → 日付サフィックス除去（claude-...-YYYYMMDD → claude-...）の
+        2 段フォールバック。compute_cost / cache_savings から共用する単一実装。
+        """
+        resolved = self.resolve_model(model)
+        rate = self.prices.get(resolved)
+        if rate is None:
+            rate = self.prices.get(_DATE_SUFFIX.sub("", resolved))
+        return rate
+
     def compute_cost(self, ev: UsageEvent) -> float | None:
         """イベントの判明コスト(USD)。未知モデルは None（未割当）。
 
@@ -77,11 +89,7 @@ class PriceBook:
         """
         if ev.model == SYNTHETIC_MODEL:
             return 0.0
-        model = self.resolve_model(ev.model)
-        rate = self.prices.get(model)
-        if rate is None:
-            # 日付サフィックスを外した基底IDで再試行（claude-...-YYYYMMDD → claude-...）。
-            rate = self.prices.get(_DATE_SUFFIX.sub("", model))
+        rate = self._rate_for(ev.model)
         if rate is None:
             return None
         per_million = (
@@ -93,6 +101,20 @@ class PriceBook:
             + ev.cache_read_tokens * rate.get("cache_read", 0.0)
         )
         return per_million / 1_000_000
+
+    def cache_savings(self, model: str, cache_read_tokens: int) -> float | None:
+        """キャッシュ読取による推定節約額(USD)。未知モデル/単価欠落は None。
+
+        節約額 = cache_read_tokens × (input単価 − cache_read単価) / 1e6。
+        同じトークンをフル input 単価で払った場合との差分（読取分のみ。書込コストの
+        償却は含まない近似）。input < cache_read という異常単価では負にしないため
+        max(0, …) でクリップする。
+        """
+        rate = self._rate_for(model)
+        if rate is None:
+            return None
+        delta = rate.get("input", 0.0) - rate.get("cache_read", 0.0)
+        return max(0.0, cache_read_tokens * delta / 1_000_000)
 
 
 def active_pricing_path() -> Path | None:

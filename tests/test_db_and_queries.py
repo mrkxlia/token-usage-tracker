@@ -97,3 +97,51 @@ def test_daily_bucket_crosses_midnight_in_utc_minus():
     # 純関数のTZバケットを直接検証（DB非依存）。
     assert queries.local_date_bucket("2026-06-14T01:00:10.000Z", "Asia/Tokyo") == "2026-06-14"
     assert queries.local_date_bucket("2026-06-14T02:00:00.000Z", "America/New_York") == "2026-06-13"
+
+
+def test_summary_includes_ratio_keys(tmp_path, claude_root):
+    """各行に派生指標キー（out/in 比・cache率・件あたりコスト）が付与される。"""
+    conn = _conn_with_data(tmp_path, claude_root)
+    for r in queries.summary(conn, "model"):
+        assert "output_input_ratio" in r
+        assert "cache_hit_ratio" in r
+        assert "cost_per_event" in r
+
+
+def test_cache_hit_ratio_formula(tmp_path, claude_root):
+    """cache_hit_ratio == cache_read / (input + cache_read)（同一行の値から再計算で検証）。"""
+    conn = _conn_with_data(tmp_path, claude_root)
+    for r in queries.summary(conn, "repo"):
+        inp, cr = r["input_tokens"], r["cache_read_tokens"]
+        if inp + cr > 0:
+            assert r["cache_hit_ratio"] == cr / (inp + cr)
+        else:
+            assert r["cache_hit_ratio"] is None
+        if inp > 0:
+            assert r["output_input_ratio"] == r["output_tokens"] / inp
+
+
+def test_ratio_divide_by_zero_is_none(tmp_path):
+    """input=0 かつ cache_read=0 のイベントでは比率が None になる。"""
+    from tokentracker.models import UsageEvent
+
+    conn = db.connect(tmp_path / "zero.db")
+    db.upsert_events(conn, [UsageEvent(
+        source="claude_code", message_id="z1", session_id="s", model="unknown-x",
+        timestamp_utc="2026-06-14T01:00:00.000Z", input_tokens=0, output_tokens=0,
+        cache_read_tokens=0, cost_usd=None,
+    )])
+    r = queries.summary(conn, "session")[0]
+    assert r["output_input_ratio"] is None
+    assert r["cache_hit_ratio"] is None
+    # events=1 なので cost_per_event は割れる（未割当なので 0.0）。None ではない。
+    assert r["cost_per_event"] == 0.0
+
+
+def test_existing_summary_keys_unchanged(tmp_path, claude_root):
+    """派生指標の後付けが既存キーの値を壊さない回帰ガード。"""
+    conn = _conn_with_data(tmp_path, claude_root)
+    r = queries.summary(conn, "repo")[0]
+    assert r["key"] == "/home/user/myrepo"
+    assert r["input_tokens"] == 130
+    assert r["output_tokens"] == 65
