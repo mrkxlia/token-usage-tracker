@@ -74,7 +74,16 @@ uv run tokentracker model      # モデル別
 uv run tokentracker agent      # ツール(エージェント)別
 uv run tokentracker session    # セッション(タスク)別
 uv run tokentracker daily      # 日次（既定 Asia/Tokyo で日付を区切る）
+
+# 3) DB スキーマ定義・分析レシピ（最適化エージェント／自分用の SQL 集）
+uv run tokentracker schema           # スキーマ定義の表示
+uv run tokentracker schema --json    # 機械可読な JSON（AI エージェントが取り込む形）
+uv run tokentracker schema --recipes # 分析レシピ（名前＋SQL）の一覧
 ```
+
+集計表には各軸の派生指標も並びます: `out/in`（output/input 比）、`cache率`
+（`cache_read/(input+cache_read)`、キャッシュ命中率）、`$/件`（イベントあたりコスト）。
+合計行の比率は合計値からの加重（比率の単純平均ではない）。
 
 共通オプション:
 
@@ -94,8 +103,20 @@ uv run --extra dashboard streamlit run tokentracker/dashboard.py \
     --server.address=127.0.0.1 --server.headless=true
 ```
 
-ローカル完結（外部送信なし）。リポジトリ／モデル／ツール／期間でフィルタし、日次推移グラフと
-軸別集計を表示します。
+ローカル完結（外部送信なし）。リポジトリ／モデル／ツール／**期間（日付範囲）**／サブエージェントで
+フィルタし、日次トークン推移・**日次コスト推移**グラフ、軸別集計（out/in・キャッシュ命中率・
+$/件 付き）、**コスト上位セッション**、**リポジトリ×モデルのトークン内訳**を表示します。
+**キャッシュ節約額の推定**メトリクスと、フィルタ後データの **CSV/JSON エクスポート**も可能です。
+
+## DB スキーマ定義（M4・最適化エージェント向け）
+
+将来 AI エージェントが DB を読んでモデル/コスト最適化を判断できるよう、スキーマの意味・
+集計規約・単価モデル・既製の分析 SQL（レシピ）を機械可読・人間可読の両方で提供します。
+
+- 人間可読: [`docs/db_schema.md`](docs/db_schema.md)
+- 機械可読: `uv run tokentracker schema --json`（`tokentracker/schema.py` の `SCHEMA_DEFINITION` が真実源）
+- 分析レシピ: `uv run tokentracker schema --recipes`（`cost_by_model` / `top_sessions_by_cost` /
+  `cache_efficiency_by_session` / `expensive_model_on_simple_work` など）
 
 ## コスト単価について（重要）
 
