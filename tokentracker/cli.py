@@ -122,6 +122,18 @@ def _probe(model: str):
                       timestamp_utc="", input_tokens=1)
 
 
+def _fmt_ratio(x: float | None) -> str:
+    return f"{x:.2f}" if x is not None else "-"
+
+
+def _fmt_pct(x: float | None) -> str:
+    return f"{x * 100:.0f}%" if x is not None else "-"
+
+
+def _fmt_cost(x: float | None) -> str:
+    return f"{x:.4f}" if x is not None else "-"
+
+
 def _render(
     dimension: str,
     db_path: Path,
@@ -152,8 +164,11 @@ def _render(
     table.add_column("cache_r", justify="right")
     table.add_column("判明コスト$", justify="right")
     table.add_column("未割当tok", justify="right")
+    table.add_column("out/in", justify="right")
+    table.add_column("cache率", justify="right")
+    table.add_column("$/件", justify="right")
 
-    tot = {"input": 0, "output": 0, "cw": 0, "cr": 0, "cost": 0.0, "un": 0}
+    tot = {"input": 0, "output": 0, "cw": 0, "cr": 0, "cost": 0.0, "un": 0, "events": 0}
     for r in rows:
         table.add_row(
             str(r["key"]),
@@ -163,6 +178,9 @@ def _render(
             f"{r['cache_read_tokens']:,}",
             f"{r['known_cost_usd']:.4f}",
             f"{r['unallocated_tokens']:,}" if r["unallocated_tokens"] else "-",
+            _fmt_ratio(r["output_input_ratio"]),
+            _fmt_pct(r["cache_hit_ratio"]),
+            _fmt_cost(r["cost_per_event"]),
         )
         tot["input"] += r["input_tokens"]
         tot["output"] += r["output_tokens"]
@@ -170,10 +188,16 @@ def _render(
         tot["cr"] += r["cache_read_tokens"]
         tot["cost"] += r["known_cost_usd"]
         tot["un"] += r["unallocated_tokens"]
+        tot["events"] += r["events"]
+    # 合計行の比率は加重（合計値から再計算。比率の平均ではない）。
+    tot_oi = tot["output"] / tot["input"] if tot["input"] > 0 else None
+    tot_ch = tot["cr"] / (tot["input"] + tot["cr"]) if (tot["input"] + tot["cr"]) > 0 else None
+    tot_cpe = tot["cost"] / tot["events"] if tot["events"] > 0 else None
     table.add_section()
     table.add_row(
         "合計", f"{tot['input']:,}", f"{tot['output']:,}", f"{tot['cw']:,}",
         f"{tot['cr']:,}", f"{tot['cost']:.4f}", f"{tot['un']:,}" if tot["un"] else "-",
+        _fmt_ratio(tot_oi), _fmt_pct(tot_ch), _fmt_cost(tot_cpe),
         style="bold",
     )
     console.print(table)
