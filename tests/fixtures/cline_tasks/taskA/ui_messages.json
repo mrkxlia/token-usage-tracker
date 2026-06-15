@@ -1,0 +1,5 @@
+[
+  {"ts": 1781755200000, "type": "say", "say": "text", "text": "starting"},
+  {"ts": 1781755201000, "type": "say", "say": "api_req_started", "text": "{\"request\":\"...\",\"tokensIn\":50,\"tokensOut\":20,\"cacheReads\":10,\"cacheWrites\":5,\"cost\":0.0123}"},
+  {"ts": 1781755260000, "type": "say", "say": "api_req_started", "text": "{\"request\":\"...\",\"tokensIn\":30,\"tokensOut\":15,\"cacheReads\":0,\"cacheWrites\":0,\"cost\":0.0050}"}
+]

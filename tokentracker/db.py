@@ -1,0 +1,101 @@
+"""SQLite スキーマと UPSERT。
+
+冪等キーは ``UNIQUE(source, message_id)``。全再読して何度 ingest しても重複行が入らない。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from tokentracker.models import UsageEvent
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS usage_event (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    source                   TEXT NOT NULL,
+    message_id               TEXT NOT NULL,
+    session_id               TEXT,
+    agent_id                 TEXT,
+    request_id               TEXT,
+    timestamp_utc            TEXT,
+    repo_path                TEXT,
+    git_branch               TEXT,
+    model                    TEXT,
+    input_tokens             INTEGER NOT NULL DEFAULT 0,
+    output_tokens            INTEGER NOT NULL DEFAULT 0,
+    reasoning_output_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens    INTEGER NOT NULL DEFAULT 0,
+    cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_5m_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens        INTEGER NOT NULL DEFAULT 0,
+    web_search_requests      INTEGER NOT NULL DEFAULT 0,
+    web_fetch_requests       INTEGER NOT NULL DEFAULT 0,
+    cost_usd                 REAL,
+    is_subagent              INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(source, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_repo  ON usage_event(repo_path);
+CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_event(model);
+CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage_event(timestamp_utc);
+
+CREATE TABLE IF NOT EXISTS prompt (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT NOT NULL,
+    session_id    TEXT,
+    role          TEXT,
+    text          TEXT,
+    timestamp_utc TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ingest_state (
+    file_path       TEXT PRIMARY KEY,
+    size            INTEGER,
+    mtime           REAL,
+    last_message_id TEXT
+);
+"""
+
+# usage_event の挿入カラム（id を除く）。UsageEvent と 1:1 で対応。
+_COLUMNS = [
+    "source", "message_id", "session_id", "agent_id", "request_id", "timestamp_utc",
+    "repo_path", "git_branch", "model", "input_tokens", "output_tokens",
+    "reasoning_output_tokens",
+    "cache_creation_tokens", "cache_creation_1h_tokens", "cache_creation_5m_tokens",
+    "cache_read_tokens", "web_search_requests", "web_fetch_requests", "cost_usd",
+    "is_subagent",
+]
+
+
+def connect(path: str | Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    return conn
+
+
+def _event_row(ev: UsageEvent) -> tuple:
+    return (
+        ev.source, ev.message_id, ev.session_id, ev.agent_id, ev.request_id,
+        ev.timestamp_utc, ev.repo_path, ev.git_branch, ev.model,
+        ev.input_tokens, ev.output_tokens, ev.reasoning_output_tokens,
+        ev.cache_creation_tokens,
+        ev.cache_creation_1h_tokens, ev.cache_creation_5m_tokens, ev.cache_read_tokens,
+        ev.web_search_requests, ev.web_fetch_requests, ev.cost_usd,
+        1 if ev.is_subagent else 0,
+    )
+
+
+def upsert_events(conn: sqlite3.Connection, events: list[UsageEvent]) -> int:
+    """イベントを UPSERT する。戻り値は対象イベント件数。"""
+    placeholders = ", ".join("?" for _ in _COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in _COLUMNS if c not in ("source", "message_id"))
+    sql = (
+        f"INSERT INTO usage_event ({', '.join(_COLUMNS)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(source, message_id) DO UPDATE SET {updates}"
+    )
+    rows = [_event_row(e) for e in events]
+    conn.executemany(sql, rows)
+    conn.commit()
+    return len(rows)
