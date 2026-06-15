@@ -1,0 +1,79 @@
+# tokentracker モデル単価表
+#
+# 値は「1M トークンあたりの USD」。知りたいのは Anthropic/OpenAI 定価ではなく
+# **Azure Foundry の実課金レート**なので、自社の課金ポータルの値に合わせて編集してください。
+# このファイルは編集せず、上書き用に ~/.tokentracker/pricing.toml へコピーするか、
+# 環境変数 TOKENTRACKER_PRICING=/path/to/pricing.toml で別ファイルを指定もできます。
+#
+# 編集方法:
+#   - 単価の修正/追加: [models."<モデルID>"] テーブルを足す/直す
+#       キー: input / output / cache_write_1h / cache_write_5m / cache_read
+#   - Foundry のデプロイ名が正規IDと違う場合: [aliases] に "デプロイ名" = "正規ID" を追加
+#       （末尾の日付サフィックス例 -20251001 は自動で基底IDに解決されます）
+
+[meta]
+source = "Claude=Anthropic公式 / GPT=Web検索(2026-06) — Azureポータルで要検証"
+effective_date = "2026-06-15"
+
+[aliases]
+# "my-opus-deployment" = "claude-opus-4-8"
+
+# ---- Claude (Anthropic / Azure Foundry) -------------------------------------
+# キャッシュ単価は input に対する倍率: read=0.1x, write_5m=1.25x, write_1h=2x
+[models."claude-opus-4-8"]
+input = 5.0
+output = 25.0
+cache_write_1h = 10.0
+cache_write_5m = 6.25
+cache_read = 0.5
+
+[models."claude-sonnet-4-6"]
+input = 3.0
+output = 15.0
+cache_write_1h = 6.0
+cache_write_5m = 3.75
+cache_read = 0.3
+
+[models."claude-haiku-4-5"]
+input = 1.0
+output = 5.0
+cache_write_1h = 2.0
+cache_write_5m = 1.25
+cache_read = 0.1
+
+[models."claude-fable-5"]
+input = 10.0
+output = 50.0
+cache_write_1h = 20.0
+cache_write_5m = 12.5
+cache_read = 1.0
+
+# ---- GPT (OpenAI / Azure OpenAI / Foundry) ----------------------------------
+# OpenAI 系にキャッシュ書込の概念は無いため write=0、read は cached input 単価。
+[models."gpt-5"]
+input = 1.25
+output = 10.0
+cache_write_1h = 0.0
+cache_write_5m = 0.0
+cache_read = 0.125
+
+[models."gpt-5-mini"]
+input = 0.25
+output = 2.0
+cache_write_1h = 0.0
+cache_write_5m = 0.0
+cache_read = 0.025
+
+[models."gpt-5-nano"]
+input = 0.05
+output = 0.40
+cache_write_1h = 0.0
+cache_write_5m = 0.0
+cache_read = 0.005
+
+[models."gpt-4.1"]
+input = 2.0
+output = 8.0
+cache_write_1h = 0.0
+cache_write_5m = 0.0
+cache_read = 0.5

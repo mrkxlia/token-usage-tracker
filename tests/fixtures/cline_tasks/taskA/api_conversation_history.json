@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": [{"type": "text", "text": "<task>fix bug</task>"}]},
+  {"role": "user", "content": [{"type": "text", "text": "<environment_details>\n# Current Model\nclaude-sonnet-4-6\n# VSCode Visible Files\nsrc/app.py\n</environment_details>"}]}
+]
