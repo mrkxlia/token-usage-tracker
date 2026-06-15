@@ -26,13 +26,17 @@ class ClaudeCodeParser(Parser):
     def default_root(self) -> Path:
         return Path.home() / ".claude" / "projects"
 
-    def _iter_raw_events(self, root: Path) -> Iterator[UsageEvent]:
+    def _iter_file_events(self, root: Path) -> Iterator[tuple[Path, list[UsageEvent]]]:
+        # 注: アーカイブ ``~/.claude/transcripts`` は extra_roots に加えない。projects と
+        # 同一 message.id を持ちうるうえ、サブエージェント階層を欠くため is_subagent が
+        # 反転する（UNIQUE(source, message_id) の UPSERT で上書きされる）リスクがあるため。
         for path in iter_jsonl_files(root):
             is_subagent = "subagents" in path.parts
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:
                 continue
+            events: list[UsageEvent] = []
             for line in text.splitlines():
                 line = line.strip()
                 if not line:
@@ -44,7 +48,8 @@ class ClaudeCodeParser(Parser):
                     continue
                 event = self._row_to_event(obj, is_subagent=is_subagent)
                 if event is not None:
-                    yield event
+                    events.append(event)
+            yield path, events
 
     def _row_to_event(self, obj: dict, *, is_subagent: bool) -> UsageEvent | None:
         # ホワイトリスト方式: assistant かつ usage を持つ行のみ（type は今後増えうる）。

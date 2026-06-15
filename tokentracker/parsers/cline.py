@@ -23,7 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tokentracker.models import SOURCE_CLINE, UsageEvent
-from tokentracker.parsers.base import Parser, vscode_global_storage_dir
+from tokentracker.parsers.base import Parser, home, vscode_global_storage_dir
+
+_CLINE_TASKS_SUBPATH = ("saoudrizwan.claude-dev", "tasks")
 
 # environment_details 等から拾うモデル ID のベストエフォート抽出。
 _MODEL_RE = re.compile(r"\b(claude-[\w.-]+|gpt-[\w.-]+|o\d[\w.-]*)\b")
@@ -45,16 +47,22 @@ class ClineParser(Parser):
     source = SOURCE_CLINE
 
     def default_root(self) -> Path:
-        return vscode_global_storage_dir() / "saoudrizwan.claude-dev" / "tasks"
+        return vscode_global_storage_dir().joinpath(*_CLINE_TASKS_SUBPATH)
 
-    def _iter_raw_events(self, root: Path) -> Iterator[UsageEvent]:
+    def extra_roots(self) -> list[Path]:
+        # VS Code Server（リモート/コンテナ実行）では globalStorage が ~/.vscode-server 配下に
+        # 置かれる。デスクトップ版と重複しないタスク ID 単位なので安全に追加できる。
+        return [home() / ".vscode-server" / "data" / "User" / "globalStorage" / Path(*_CLINE_TASKS_SUBPATH)]
+
+    def _iter_file_events(self, root: Path) -> Iterator[tuple[Path, list[UsageEvent]]]:
         if not root.exists():
             return
         for task_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             ui = task_dir / "ui_messages.json"
             if not ui.exists():
                 continue
-            yield from self._iter_task(task_dir, ui)
+            # 状態キーは追記される ui_messages.json。タスク進行で size/mtime が変わり再取り込みされる。
+            yield ui, list(self._iter_task(task_dir, ui))
 
     def _iter_task(self, task_dir: Path, ui: Path) -> Iterator[UsageEvent]:
         task_id = task_dir.name

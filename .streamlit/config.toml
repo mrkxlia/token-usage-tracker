@@ -1,0 +1,11 @@
+# クリーンSaaS（ライト）テーマ。外部送信なし・ローカル完結のダッシュボード用。
+[theme]
+base = "light"
+primaryColor = "#4F46E5"
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#111827"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
