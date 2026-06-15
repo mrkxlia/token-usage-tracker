@@ -30,13 +30,13 @@ class CodexParser(Parser):
     def default_root(self) -> Path:
         return Path.home() / ".codex" / "sessions"
 
-    def _iter_raw_events(self, root: Path) -> Iterator[UsageEvent]:
+    def _iter_file_events(self, root: Path) -> Iterator[tuple[Path, list[UsageEvent]]]:
         for path in iter_jsonl_files(root, "**/rollout-*.jsonl"):
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            yield from self._iter_file(path, text)
+            yield path, list(self._iter_file(path, text))
 
     def _iter_file(self, path: Path, text: str) -> Iterator[UsageEvent]:
         session_id = ""
@@ -60,6 +60,9 @@ class CodexParser(Parser):
                 model = payload.get("model", model) or model
             elif item_type == "event_msg" and payload.get("type") == "token_count":
                 info = payload.get("info") or {}
+                # last_token_usage は「直近ターン単体」の usage（per-call）。
+                # total_token_usage はセッション累積なので、last が無い旧版ログ用の
+                # フォールバックに留める（累積をそのまま計上すると過大になる）。
                 last = info.get("last_token_usage") or info.get("total_token_usage") or {}
                 ev = self._usage_to_event(
                     last, session_id=session_id, cwd=cwd, model=model,
