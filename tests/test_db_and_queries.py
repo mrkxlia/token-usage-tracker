@@ -97,3 +97,53 @@ def test_daily_bucket_crosses_midnight_in_utc_minus():
     # 純関数のTZバケットを直接検証（DB非依存）。
     assert queries.local_date_bucket("2026-06-14T01:00:10.000Z", "Asia/Tokyo") == "2026-06-14"
     assert queries.local_date_bucket("2026-06-14T02:00:00.000Z", "America/New_York") == "2026-06-13"
+
+
+def test_date_filter_boundaries_are_exact(tmp_path, claude_root):
+    """SQL プリフィルタ(±1日pad)後もローカル日付境界が厳密であること。全件は 06-14。"""
+    conn = _conn_with_data(tmp_path, claude_root)
+    # 当日を含む since は全件残る。
+    assert queries.summary(conn, "repo", since="2026-06-14")[0]["input_tokens"] == 130
+    # 翌日以降の since は pad で SQL には残るが、ループ再判定で全件除外され空になる。
+    assert queries.summary(conn, "repo", since="2026-06-15") == []
+    # until が前日なら全件除外。
+    assert queries.summary(conn, "repo", until="2026-06-13") == []
+    # until が当日なら全件残る。
+    assert queries.summary(conn, "repo", until="2026-06-14")[0]["input_tokens"] == 130
+
+
+def test_compute_cost_is_non_destructive():
+    """ingest の単価付与は元イベントを変更せず新インスタンスへ cost_usd を埋める(H2)。"""
+    from dataclasses import replace
+
+    from tokentracker.models import UsageEvent
+
+    ev = UsageEvent(
+        source="claude_code", message_id="m", session_id="s",
+        model="claude-sonnet-4-6", timestamp_utc="2026-06-14T01:00:00Z", input_tokens=1000,
+    )
+    priced = replace(ev, cost_usd=_book().compute_cost(ev))
+    assert ev.cost_usd is None           # 元は非破壊
+    assert priced.cost_usd is not None   # 新インスタンスに付与
+    assert priced is not ev
+
+
+def test_event_row_matches_columns_and_normalizes_bool():
+    """_event_row は _COLUMNS の順序・要素数に一致し、bool を 0/1 に正規化する(H3)。"""
+    from tokentracker.models import UsageEvent
+
+    ev = UsageEvent(
+        source="claude_code", message_id="m", session_id="s",
+        model="x", timestamp_utc="2026-06-14T01:00:00Z", is_subagent=True,
+    )
+    row = db._event_row(ev)
+    assert len(row) == len(db._COLUMNS)
+    assert row[db._COLUMNS.index("is_subagent")] == 1
+    assert row[db._COLUMNS.index("source")] == "claude_code"
+
+
+def test_columns_cover_all_dataclass_fields():
+    """_COLUMNS と UsageEvent のフィールド集合が一致（追加忘れの無言バグ防止, H3）。"""
+    from tokentracker.models import UsageEvent
+
+    assert set(db._COLUMNS) == set(UsageEvent.column_names())

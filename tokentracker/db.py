@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 );
 """
 
-# usage_event の挿入カラム（id を除く）。UsageEvent と 1:1 で対応。
+# usage_event の挿入カラム（id を除く）。INSERT の列順・VALUES・行タプル生成すべての単一の真実源。
+# INSERT は列名を明示するため SCHEMA 内の物理順とは独立。ここの順序が _event_row() の順序を決める。
 _COLUMNS = [
     "source", "message_id", "session_id", "agent_id", "request_id", "timestamp_utc",
     "repo_path", "git_branch", "model", "input_tokens", "output_tokens",
@@ -66,6 +67,13 @@ _COLUMNS = [
     "cache_read_tokens", "web_search_requests", "web_fetch_requests", "cost_usd",
     "is_subagent",
 ]
+
+# UsageEvent のフィールドと _COLUMNS のズレ（追加忘れ・誤記）を import 時に検出する。
+# 名前集合が一致していれば、_event_row() は getattr で順序安全に組める。
+assert set(_COLUMNS) == set(UsageEvent.column_names()), (
+    "db._COLUMNS と UsageEvent のフィールドが不一致です: "
+    f"差分={set(_COLUMNS) ^ set(UsageEvent.column_names())}"
+)
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -76,14 +84,13 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def _event_row(ev: UsageEvent) -> tuple:
-    return (
-        ev.source, ev.message_id, ev.session_id, ev.agent_id, ev.request_id,
-        ev.timestamp_utc, ev.repo_path, ev.git_branch, ev.model,
-        ev.input_tokens, ev.output_tokens, ev.reasoning_output_tokens,
-        ev.cache_creation_tokens,
-        ev.cache_creation_1h_tokens, ev.cache_creation_5m_tokens, ev.cache_read_tokens,
-        ev.web_search_requests, ev.web_fetch_requests, ev.cost_usd,
-        1 if ev.is_subagent else 0,
+    """UsageEvent を _COLUMNS の順序どおりの行タプルへ変換する。
+
+    順序は _COLUMNS が単一の真実源。bool は SQLite 用に 0/1 へ正規化する。
+    """
+    return tuple(
+        int(v) if isinstance(v, bool) else v
+        for v in (getattr(ev, c) for c in _COLUMNS)
     )
 
 

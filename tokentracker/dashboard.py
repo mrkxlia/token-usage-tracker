@@ -23,10 +23,9 @@ import pandas as pd
 import streamlit as st
 
 from tokentracker import db
+from tokentracker.config import DEFAULT_DB
 from tokentracker.ingest import INGESTORS, ingest_all
 from tokentracker.queries import local_date_bucket
-
-DEFAULT_DB = Path.home() / ".tokentracker" / "usage.db"
 
 # --- デザイントークン --------------------------------------------------------
 ACCENT = "#4F46E5"          # インディゴ（コスト/プライマリ）

@@ -22,6 +22,7 @@ from rich.console import Console
 from rich.table import Table
 
 from tokentracker import db, queries
+from tokentracker.config import DEFAULT_DB
 from tokentracker.ingest import INGESTORS, ingest_all
 from tokentracker.pricing import (
     BUNDLED_PRICING,
@@ -32,8 +33,6 @@ from tokentracker.queries import DEFAULT_TZ
 
 app = typer.Typer(add_completion=False, help="AIエージェントのトークン消費トラッカー")
 console = Console()
-
-DEFAULT_DB = Path.home() / ".tokentracker" / "usage.db"
 
 
 def _open(db_path: Path):

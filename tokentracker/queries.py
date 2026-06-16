@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = "Asia/Tokyo"
@@ -26,6 +26,15 @@ def local_date_bucket(timestamp_utc: str, tz: str = DEFAULT_TZ) -> str:
     iso = timestamp_utc.replace("Z", "+00:00")
     dt = datetime.fromisoformat(iso)
     return dt.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
+
+
+def _pad_date(value: str, days: int) -> str | None:
+    """``YYYY-MM-DD`` を days 日ずらして返す。パース不能なら None（プリフィルタ無効化）。"""
+    try:
+        d = date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+    return (d + timedelta(days=days)).isoformat()
 
 
 def _row_key(row: sqlite3.Row, dimension: str, tz: str) -> str:
@@ -53,18 +62,47 @@ def summary(
     known_cost_usd(単価判明分の合計) / unallocated_tokens(単価不明分のトークン) /
     unallocated_events(単価不明件数) / events。
     """
-    rows = conn.execute("SELECT * FROM usage_event").fetchall()
+    # --- SQL 側プリフィルタ（行数を減らす）-----------------------------------
+    # サブエージェント除外は厳密。期間は UTC 文字列の日付部分で ±1 日 pad した粗い絞り込みに留め、
+    # 厳密な境界はループ内の local_date_bucket で再判定する（TZ オフセット差を吸収）。
+    where: list[str] = []
+    params: list = []
+    if not include_subagents:
+        where.append("is_subagent = 0")
+    date_filtered = since is not None or until is not None
+    if date_filtered:
+        where.append("timestamp_utc IS NOT NULL AND timestamp_utc != ''")
+        lo = _pad_date(since, -1) if since is not None else None
+        if lo is not None:
+            where.append("substr(timestamp_utc, 1, 10) >= ?")
+            params.append(lo)
+        hi = _pad_date(until, 1) if until is not None else None
+        if hi is not None:
+            where.append("substr(timestamp_utc, 1, 10) <= ?")
+            params.append(hi)
+    sql = "SELECT * FROM usage_event"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = conn.execute(sql, params).fetchall()
+
+    # daily か期間フィルタ時のみローカル日付の算出が必要（不要時は per-row パースを避ける）。
+    need_day = dimension == "daily" or date_filtered
     buckets: dict[str, dict] = {}
     for row in rows:
         if not include_subagents and row["is_subagent"]:
             continue
-        key = _row_key(row, dimension, tz)
-        if since is not None or until is not None:
-            day = local_date_bucket(row["timestamp_utc"], tz) if row["timestamp_utc"] else None
+        day = None
+        if need_day:
+            ts = row["timestamp_utc"]
+            day = local_date_bucket(ts, tz) if ts else None
             if since is not None and (day is None or day < since):
                 continue
             if until is not None and (day is None or day > until):
                 continue
+        if dimension == "daily":
+            key = day if day is not None else "(unknown)"
+        else:
+            key = _row_key(row, dimension, tz)
         b = buckets.setdefault(
             key,
             {
