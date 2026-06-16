@@ -107,6 +107,20 @@ def test_aggregate_and_chart(tmp_path):
     assert isinstance(chart, alt.TopLevelMixin)
 
 
+def test_build_daily_chart_empty_returns_none():
+    """空 DataFrame では None を返し、呼び出し側が描画をスキップできる。"""
+    import pandas as pd
+
+    assert dash.build_daily_chart(pd.DataFrame()) is None
+
+
+def test_valid_tz_helper():
+    assert dash._valid_tz("Asia/Tokyo") is True
+    assert dash._valid_tz("America/New_York") is True
+    assert dash._valid_tz("Not/AZone") is False
+    assert dash._valid_tz("") is False
+
+
 def test_run_ingest_reports_new_count(tmp_path, monkeypatch):
     """run_ingest は取り込み前後の行数差を新規件数として返す。"""
     def fake_ingest_all(conn, *, sources=None, incremental=True):
@@ -146,6 +160,19 @@ def test_app_renders_kpis_with_data(tmp_path):
     assert "トークン構成" in md
     # 集計の軸ラジオが出ている＝データ経路まで到達。
     assert any(r.label == "集計軸" for r in at.radio)
+
+
+def test_app_invalid_timezone_falls_back(tmp_path):
+    """無効な TZ を入れてもエラー表示のうえ既定にフォールバックし、画面は描画される。"""
+    db_path = _seed_db(tmp_path)
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.text_input(key="db_path").set_value(db_path).run()
+    at.text_input(key="tz").set_value("Not/AZone").run()
+    assert not at.exception
+    assert any("無効なタイムゾーン" in e.value for e in at.error)
+    # フォールバックして KPI まで到達する。
+    assert any("イベント数" in m.value for m in at.markdown)
 
 
 def test_app_shows_error_for_unreadable_db(tmp_path):

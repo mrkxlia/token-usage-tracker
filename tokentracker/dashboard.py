@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import TypedDict
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -25,7 +27,17 @@ import streamlit as st
 from tokentracker import db
 from tokentracker.config import DEFAULT_DB
 from tokentracker.ingest import INGESTORS, ingest_all
-from tokentracker.queries import local_date_bucket
+from tokentracker.queries import DEFAULT_TZ, local_date_bucket
+
+
+class Kpis(TypedDict):
+    """``compute_kpis()`` の戻り値。実体は dict なので既存の参照は変わらない。"""
+
+    known_cost: float
+    total_tokens: int
+    unalloc: int
+    events: int
+    composition: dict[str, int]
 
 # --- デザイントークン --------------------------------------------------------
 ACCENT = "#4F46E5"          # インディゴ（コスト/プライマリ）
@@ -47,10 +59,21 @@ COMP_LABELS = {
 
 # === データ層 ================================================================
 
+def _valid_tz(tz: str) -> bool:
+    """ZoneInfo が解決できる有効なタイムゾーン名か。"""
+    try:
+        ZoneInfo(tz)
+        return True
+    except Exception:
+        return False
+
+
 def _load_df(db_path: str, tz: str) -> pd.DataFrame:
     """SQLite から DataFrame を組み立てる（キャッシュ無し・テスト用にも使う純関数）。"""
-    conn = sqlite3.connect(db_path)
+    # 読み取り専用 + タイムアウトで、誤書き込みや破損 DB によるハングを防ぐ。
+    conn = sqlite3.connect(db_path, timeout=5)
     try:
+        conn.execute("PRAGMA query_only = ON")
         df = pd.read_sql_query("SELECT * FROM usage_event", conn)
     finally:
         conn.close()
@@ -106,7 +129,7 @@ def filter_df(
     return df[mask]
 
 
-def compute_kpis(df: pd.DataFrame) -> dict:
+def compute_kpis(df: pd.DataFrame) -> Kpis:
     """KPI とトークン構成（入力/出力/キャッシュ読）を集計する。"""
     known_cost = float(df.loc[df["cost_usd"].notna(), "cost_usd"].sum())
     unalloc = int(df.loc[df["cost_usd"].isna(), "total_tokens"].sum())
@@ -134,8 +157,10 @@ def aggregate(df: pd.DataFrame, dim: str) -> pd.DataFrame:
     )
 
 
-def build_daily_chart(df: pd.DataFrame) -> alt.Chart:
-    """日次のトークン推移（積み上げエリア、アクセント配色に統一）。"""
+def build_daily_chart(df: pd.DataFrame) -> alt.Chart | None:
+    """日次のトークン推移（積み上げエリア）。空 or date 欠落なら None。"""
+    if df.empty or "date" not in df.columns:
+        return None
     daily = (
         df.groupby("date")[list(COMP_COLORS)].sum().reset_index()
         .melt("date", var_name="種別", value_name="トークン")
@@ -194,7 +219,7 @@ def _inject_theme() -> None:
     )
 
 
-def _render_kpis(k: dict) -> None:
+def _render_kpis(k: Kpis) -> None:
     def fmt(n: int) -> str:
         return f"{n:,}"
 
@@ -273,32 +298,8 @@ def _empty_state(db_path: str) -> None:
 
 # === メイン =================================================================
 
-def main() -> None:
-    st.set_page_config(page_title="Token Usage Tracker", layout="wide")
-    _inject_theme()
-    st.markdown('<div class="ttk-title">AIエージェント トークン消費トラッカー</div>', unsafe_allow_html=True)
-    st.markdown('<div class="ttk-sub">ローカル完結 · どのリポジトリ / モデル / ツールがトークンとコストを消費したかを可視化</div>', unsafe_allow_html=True)
-
-    db_path = st.sidebar.text_input("DB パス", str(DEFAULT_DB), key="db_path")
-    tz = st.sidebar.text_input("タイムゾーン", "Asia/Tokyo", key="tz")
-    st.sidebar.divider()
-    _sidebar_ingest(db_path)
-    st.sidebar.divider()
-
-    if not Path(db_path).exists():
-        _empty_state(db_path)
-        return
-
-    try:
-        df = load(db_path, tz)
-    except Exception as exc:
-        st.error(f"DB を読み込めませんでした: {exc}")
-        return
-    if df.empty:
-        _empty_state(db_path)
-        return
-
-    # フィルタ
+def _filter_sidebar(df: pd.DataFrame) -> pd.DataFrame:
+    """サイドバーのフィルタ UI を描画し、適用済みの DataFrame を返す。"""
     with st.sidebar:
         st.subheader("フィルタ")
         repos = sorted(df["repo_path"].dropna().unique())
@@ -319,16 +320,14 @@ def main() -> None:
             )
             if isinstance(rng, (tuple, list)) and len(rng) == 2:
                 since, until = rng
-
-    f = filter_df(
+    return filter_df(
         df, repos=sel_repo, models=sel_model, sources=sel_source,
         include_sub=include_sub, since=since, until=until,
     )
 
-    if f.empty:
-        st.info("選択した条件に一致するデータがありません。フィルタを広げてください。")
-        return
 
+def _render_analysis(f: pd.DataFrame) -> None:
+    """KPI・構成バー・日次推移・軸別集計を描画する。"""
     k = compute_kpis(f)
     _render_kpis(k)
     if k["unalloc"]:
@@ -336,11 +335,48 @@ def main() -> None:
 
     st.markdown("&nbsp;", unsafe_allow_html=True)
     st.subheader("日次トークン推移")
-    st.altair_chart(build_daily_chart(f), use_container_width=True)
+    chart = build_daily_chart(f)
+    if chart is not None:
+        st.altair_chart(chart, use_container_width=True)
 
     st.subheader("集計")
     dim = st.radio("集計軸", ["repo_path", "model", "source", "session_id"], horizontal=True, key="agg_dim")
     st.dataframe(aggregate(f, dim), use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Token Usage Tracker", layout="wide")
+    _inject_theme()
+    st.markdown('<div class="ttk-title">AIエージェント トークン消費トラッカー</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ttk-sub">ローカル完結 · どのリポジトリ / モデル / ツールがトークンとコストを消費したかを可視化</div>', unsafe_allow_html=True)
+
+    db_path = st.sidebar.text_input("DB パス", str(DEFAULT_DB), key="db_path")
+    tz = st.sidebar.text_input("タイムゾーン", DEFAULT_TZ, key="tz")
+    if not _valid_tz(tz):
+        st.sidebar.error(f"無効なタイムゾーン: {tz}（例: Asia/Tokyo）。既定 {DEFAULT_TZ} を使用します。")
+        tz = DEFAULT_TZ
+    st.sidebar.divider()
+    _sidebar_ingest(db_path)
+    st.sidebar.divider()
+
+    if not Path(db_path).exists():
+        _empty_state(db_path)
+        return
+
+    try:
+        df = load(db_path, tz)
+    except Exception as exc:
+        st.error(f"DB を読み込めませんでした: {exc}")
+        return
+    if df.empty:
+        _empty_state(db_path)
+        return
+
+    f = _filter_sidebar(df)
+    if f.empty:
+        st.info("選択した条件に一致するデータがありません。フィルタを広げてください。")
+        return
+    _render_analysis(f)
 
 
 if __name__ == "__main__":

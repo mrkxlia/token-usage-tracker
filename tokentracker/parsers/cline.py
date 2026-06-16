@@ -21,9 +21,16 @@ import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from tokentracker.models import SOURCE_CLINE, UsageEvent
-from tokentracker.parsers.base import Parser, home, vscode_global_storage_dir
+from tokentracker.parsers.base import (
+    Parser,
+    home,
+    read_json_file,
+    safe_int,
+    vscode_global_storage_dir,
+)
 
 _CLINE_TASKS_SUBPATH = ("saoudrizwan.claude-dev", "tasks")
 
@@ -31,7 +38,7 @@ _CLINE_TASKS_SUBPATH = ("saoudrizwan.claude-dev", "tasks")
 _MODEL_RE = re.compile(r"\b(claude-[\w.-]+|gpt-[\w.-]+|o\d[\w.-]*)\b")
 
 
-def _iter_strings(obj):
+def _iter_strings(obj: Any) -> Iterator[str]:
     """JSON 由来のネスト構造から文字列リーフを再帰的に列挙する。"""
     if isinstance(obj, str):
         yield obj
@@ -68,9 +75,8 @@ class ClineParser(Parser):
         task_id = task_dir.name
         repo_path = self._read_repo_path(task_dir)
         model = self._read_model(task_dir)
-        try:
-            messages = json.loads(ui.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        messages = read_json_file(ui)
+        if not isinstance(messages, list):
             return
         index = 0
         for msg in messages:
@@ -85,11 +91,11 @@ class ClineParser(Parser):
                 session_id=task_id,
                 model=model,
                 timestamp_utc=self.ms_to_iso(msg.get("ts")) if msg.get("ts") else "",
-                input_tokens=int(info.get("tokensIn", 0) or 0),
-                output_tokens=int(info.get("tokensOut", 0) or 0),
-                cache_read_tokens=int(info.get("cacheReads", 0) or 0),
+                input_tokens=safe_int(info, "tokensIn"),
+                output_tokens=safe_int(info, "tokensOut"),
+                cache_read_tokens=safe_int(info, "cacheReads"),
                 # TTL 不明のため 5m と仮定して割り当て。
-                cache_creation_5m_tokens=int(info.get("cacheWrites", 0) or 0),
+                cache_creation_5m_tokens=safe_int(info, "cacheWrites"),
                 repo_path=repo_path,
             )
             index += 1
@@ -106,7 +112,7 @@ class ClineParser(Parser):
 
     @staticmethod
     def _read_repo_path(task_dir: Path) -> str | None:
-        meta = ClineParser._read_json(task_dir / "task_metadata.json")
+        meta = read_json_file(task_dir / "task_metadata.json")
         if isinstance(meta, dict):
             return meta.get("cwdOnTaskInitialization") or meta.get("shadowGitConfigWorkTree")
         return None
@@ -114,7 +120,7 @@ class ClineParser(Parser):
     @staticmethod
     def _read_model(task_dir: Path) -> str:
         # 1) task_metadata の明示フィールド
-        meta = ClineParser._read_json(task_dir / "task_metadata.json")
+        meta = read_json_file(task_dir / "task_metadata.json")
         if isinstance(meta, dict):
             for key in ("model", "apiModelId", "modelId"):
                 if meta.get(key):
@@ -122,7 +128,7 @@ class ClineParser(Parser):
         # 2) api_conversation_history のデコード済み文字列値からベストエフォート抽出。
         #    生テキストを直接 search すると JSON の `\n` エスケープで語境界が崩れるため、
         #    json.loads して実際の文字列値（改行が実改行）に対して検索する。
-        hist = ClineParser._read_json(task_dir / "api_conversation_history.json")
+        hist = read_json_file(task_dir / "api_conversation_history.json")
         for s in _iter_strings(hist):
             m = _MODEL_RE.search(s)
             if m:
@@ -130,14 +136,5 @@ class ClineParser(Parser):
         return ""  # 不明 → 未割当
 
     @staticmethod
-    def _read_json(path: Path):
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-
-    @staticmethod
-    def ms_to_iso(ms) -> str:
+    def ms_to_iso(ms: Any) -> str:
         return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat()

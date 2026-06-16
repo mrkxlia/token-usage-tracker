@@ -147,3 +147,17 @@ def test_columns_cover_all_dataclass_fields():
     from tokentracker.models import UsageEvent
 
     assert set(db._COLUMNS) == set(UsageEvent.column_names())
+
+
+def test_placeholder_keys_for_null_dimension_and_missing_timestamp(tmp_path):
+    """軸カラム NULL は NONE_KEY、timestamp 欠落の日次は UNKNOWN_KEY で集計される(M5)。"""
+    from tokentracker.models import UsageEvent
+
+    conn = db.connect(tmp_path / "p.db")
+    db.upsert_events(conn, [
+        UsageEvent("codex", "m1", "s", "model-x", "", input_tokens=5),  # repo_path=None, ts=""
+    ])
+    repo = {r["key"]: r for r in queries.summary(conn, "repo")}
+    assert queries.NONE_KEY in repo
+    daily = {r["key"] for r in queries.summary(conn, "daily")}
+    assert queries.UNKNOWN_KEY in daily

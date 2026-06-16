@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timedelta
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = "Asia/Tokyo"
@@ -19,6 +20,24 @@ _DIMENSION_COLUMN = {
     "session": "session_id",
     "agent": "source",
 }
+
+# 集計キーのプレースホルダ。timestamp 欠落の日次バケットと、軸カラムが NULL の行を区別する。
+UNKNOWN_KEY = "(unknown)"  # daily で timestamp_utc が無い
+NONE_KEY = "(none)"        # 軸カラム（repo_path 等）が NULL
+
+
+class SummaryRow(TypedDict):
+    """``summary()`` が返す 1 行。実体は dict なので JSON 化や ``row["key"]`` 参照は従来どおり。"""
+
+    key: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    known_cost_usd: float
+    unallocated_tokens: int
+    unallocated_events: int
+    events: int
 
 
 def local_date_bucket(timestamp_utc: str, tz: str = DEFAULT_TZ) -> str:
@@ -40,11 +59,11 @@ def _pad_date(value: str, days: int) -> str | None:
 def _row_key(row: sqlite3.Row, dimension: str, tz: str) -> str:
     if dimension == "daily":
         ts = row["timestamp_utc"]
-        return local_date_bucket(ts, tz) if ts else "(unknown)"
+        return local_date_bucket(ts, tz) if ts else UNKNOWN_KEY
     column = _DIMENSION_COLUMN.get(dimension)
     if column is None:
         raise ValueError(f"unknown dimension: {dimension}")
-    return row[column] if row[column] is not None else "(none)"
+    return row[column] if row[column] is not None else NONE_KEY
 
 
 def summary(
@@ -55,7 +74,7 @@ def summary(
     until: str | None = None,
     include_subagents: bool = True,
     tz: str = DEFAULT_TZ,
-) -> list[dict]:
+) -> list[SummaryRow]:
     """指定軸で集計した行のリストを返す。
 
     各行: key / input_tokens / output_tokens / cache_creation_tokens / cache_read_tokens /
@@ -87,7 +106,7 @@ def summary(
 
     # daily か期間フィルタ時のみローカル日付の算出が必要（不要時は per-row パースを避ける）。
     need_day = dimension == "daily" or date_filtered
-    buckets: dict[str, dict] = {}
+    buckets: dict[str, SummaryRow] = {}
     for row in rows:
         if not include_subagents and row["is_subagent"]:
             continue
@@ -100,7 +119,7 @@ def summary(
             if until is not None and (day is None or day > until):
                 continue
         if dimension == "daily":
-            key = day if day is not None else "(unknown)"
+            key = day if day is not None else UNKNOWN_KEY
         else:
             key = _row_key(row, dimension, tz)
         b = buckets.setdefault(
