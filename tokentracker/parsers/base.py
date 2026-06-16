@@ -11,12 +11,17 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import platform
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 from tokentracker.models import UsageEvent
+
+logger = logging.getLogger("tokentracker.parsers")
 
 
 class Parser(ABC):
@@ -78,6 +83,8 @@ class Parser(ABC):
                 best[ev.message_id] = ev
         return list(best.values())
 
+    # 以下 2 つは dedup 済み/生の平坦列を返す簡易 API。ingest 本体は iter_file_events を使うが、
+    # 単体テストや外部利用のため残す（未使用ではない）。
     def _iter_raw_events(self, root: Path) -> Iterator[UsageEvent]:
         """重複を含む生のイベント列を yield する（dedup 前・単一ルート）。"""
         for _path, events in self._iter_file_events(root):
@@ -87,6 +94,53 @@ class Parser(ABC):
         """dedup 済みのイベントを yield する（単一ルート。既存挙動を維持）。"""
         root = root or self.default_root()
         yield from self._dedup(self._iter_raw_events(root))
+
+
+# --- パーサ共通ヘルパー（3 実装の防御的ボイラープレートを集約）-------------------
+
+def read_text_file(path: Path) -> str | None:
+    """テキストを読み込む。読めなければ警告を出して None（呼び出し側でスキップ）。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("ファイルを読めずスキップ: %s (%s)", path, exc)
+        return None
+
+
+def read_json_file(path: Path) -> Any | None:
+    """JSON ファイルを読み込む。存在しない/壊れている場合は None。"""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        logger.warning("JSON を読めずスキップ: %s (%s)", path, exc)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("JSON 解析に失敗しスキップ: %s (%s)", path, exc)
+        return None
+
+
+def iter_jsonl_objects(text: str) -> Iterator[dict]:
+    """JSONL テキストを 1 行ずつ dict として yield する。
+
+    空行・不完全行（ストリーミング途中で生じうる）・dict 以外の行は安全に読み飛ばす。
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def safe_int(obj: dict, key: str, default: int = 0) -> int:
+    """``obj[key]`` を int 化する。欠落・None・空文字は default に倒す。"""
+    return int(obj.get(key, default) or default)
 
 
 def home() -> Path:

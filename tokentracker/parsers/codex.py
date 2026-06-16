@@ -16,12 +16,18 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 
 from tokentracker.models import SOURCE_CODEX, UsageEvent
-from tokentracker.parsers.base import Parser, iter_jsonl_files
+from tokentracker.parsers.base import (
+    Parser,
+    iter_jsonl_files,
+    iter_jsonl_objects,
+    logger,
+    read_text_file,
+    safe_int,
+)
 
 
 class CodexParser(Parser):
@@ -32,9 +38,8 @@ class CodexParser(Parser):
 
     def _iter_file_events(self, root: Path) -> Iterator[tuple[Path, list[UsageEvent]]]:
         for path in iter_jsonl_files(root, "**/rollout-*.jsonl"):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
+            text = read_text_file(path)
+            if text is None:
                 continue
             yield path, list(self._iter_file(path, text))
 
@@ -43,14 +48,7 @@ class CodexParser(Parser):
         cwd: str | None = None
         model = ""
         token_count_index = 0
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for data in iter_jsonl_objects(text):
             item_type = data.get("type")
             payload = data.get("payload") or {}
             if item_type == "session_meta":
@@ -61,9 +59,16 @@ class CodexParser(Parser):
             elif item_type == "event_msg" and payload.get("type") == "token_count":
                 info = payload.get("info") or {}
                 # last_token_usage は「直近ターン単体」の usage（per-call）。
-                # total_token_usage はセッション累積なので、last が無い旧版ログ用の
-                # フォールバックに留める（累積をそのまま計上すると過大になる）。
-                last = info.get("last_token_usage") or info.get("total_token_usage") or {}
+                last = info.get("last_token_usage")
+                if last is None:
+                    # 旧版ログ用フォールバック。total はセッション累積なので、そのまま計上すると
+                    # 過大になりうる。気づけるよう警告を出す。
+                    last = info.get("total_token_usage") or {}
+                    if last:
+                        logger.warning(
+                            "last_token_usage が無く total_token_usage で代用（過大計上の恐れ）: %s",
+                            path,
+                        )
                 ev = self._usage_to_event(
                     last, session_id=session_id, cwd=cwd, model=model,
                     message_id=f"{path.stem}#{token_count_index}",
@@ -76,8 +81,8 @@ class CodexParser(Parser):
         self, usage: dict, *, session_id: str, cwd: str | None, model: str,
         message_id: str, timestamp: str,
     ) -> UsageEvent:
-        raw_input = int(usage.get("input_tokens", 0) or 0)
-        cached = int(usage.get("cached_input_tokens", 0) or 0)
+        raw_input = safe_int(usage, "input_tokens")
+        cached = safe_int(usage, "cached_input_tokens")
         return UsageEvent(
             source=self.source,
             message_id=message_id,
@@ -87,8 +92,8 @@ class CodexParser(Parser):
             # cached は input の内訳。二重計上を避けて分離する。
             input_tokens=max(0, raw_input - cached),
             cache_read_tokens=cached,
-            output_tokens=int(usage.get("output_tokens", 0) or 0),
-            reasoning_output_tokens=int(usage.get("reasoning_output_tokens", 0) or 0),
+            output_tokens=safe_int(usage, "output_tokens"),
+            reasoning_output_tokens=safe_int(usage, "reasoning_output_tokens"),
             repo_path=cwd,
         )
 
@@ -102,8 +107,8 @@ class CodexParser(Parser):
         if total is None:
             return True
         summed = (
-            int(usage.get("input_tokens", 0) or 0)
-            + int(usage.get("output_tokens", 0) or 0)
-            + int(usage.get("reasoning_output_tokens", 0) or 0)
+            safe_int(usage, "input_tokens")
+            + safe_int(usage, "output_tokens")
+            + safe_int(usage, "reasoning_output_tokens")
         )
         return int(total) == summed

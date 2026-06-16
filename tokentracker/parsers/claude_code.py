@@ -12,12 +12,17 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 
 from tokentracker.models import SOURCE_CLAUDE_CODE, UsageEvent
-from tokentracker.parsers.base import Parser, iter_jsonl_files
+from tokentracker.parsers.base import (
+    Parser,
+    iter_jsonl_files,
+    iter_jsonl_objects,
+    read_text_file,
+    safe_int,
+)
 
 
 class ClaudeCodeParser(Parser):
@@ -32,23 +37,14 @@ class ClaudeCodeParser(Parser):
         # 反転する（UNIQUE(source, message_id) の UPSERT で上書きされる）リスクがあるため。
         for path in iter_jsonl_files(root):
             is_subagent = "subagents" in path.parts
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
+            text = read_text_file(path)
+            if text is None:
                 continue
-            events: list[UsageEvent] = []
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    # ストリーミング途中の不完全行はスキップ。
-                    continue
-                event = self._row_to_event(obj, is_subagent=is_subagent)
-                if event is not None:
-                    events.append(event)
+            events = [
+                ev
+                for obj in iter_jsonl_objects(text)
+                if (ev := self._row_to_event(obj, is_subagent=is_subagent)) is not None
+            ]
             yield path, events
 
     def _row_to_event(self, obj: dict, *, is_subagent: bool) -> UsageEvent | None:
@@ -70,14 +66,14 @@ class ClaudeCodeParser(Parser):
             session_id=obj.get("sessionId", ""),
             model=message.get("model", ""),
             timestamp_utc=obj.get("timestamp", ""),
-            input_tokens=int(usage.get("input_tokens", 0) or 0),
-            output_tokens=int(usage.get("output_tokens", 0) or 0),
-            cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
-            cache_creation_1h_tokens=int(cache_creation.get("ephemeral_1h_input_tokens", 0) or 0),
-            cache_creation_5m_tokens=int(cache_creation.get("ephemeral_5m_input_tokens", 0) or 0),
-            cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
-            web_search_requests=int(server_tool.get("web_search_requests", 0) or 0),
-            web_fetch_requests=int(server_tool.get("web_fetch_requests", 0) or 0),
+            input_tokens=safe_int(usage, "input_tokens"),
+            output_tokens=safe_int(usage, "output_tokens"),
+            cache_creation_tokens=safe_int(usage, "cache_creation_input_tokens"),
+            cache_creation_1h_tokens=safe_int(cache_creation, "ephemeral_1h_input_tokens"),
+            cache_creation_5m_tokens=safe_int(cache_creation, "ephemeral_5m_input_tokens"),
+            cache_read_tokens=safe_int(usage, "cache_read_input_tokens"),
+            web_search_requests=safe_int(server_tool, "web_search_requests"),
+            web_fetch_requests=safe_int(server_tool, "web_fetch_requests"),
             agent_id=obj.get("agentId") if is_subagent else None,
             request_id=obj.get("requestId"),
             repo_path=obj.get("cwd"),
@@ -96,8 +92,8 @@ class ClaudeCodeParser(Parser):
         if not iterations:
             return True
         for field in ("input_tokens", "output_tokens"):
-            top = int(usage.get(field, 0) or 0)
-            summed = sum(int(it.get(field, 0) or 0) for it in iterations)
+            top = safe_int(usage, field)
+            summed = sum(safe_int(it, field) for it in iterations)
             if top != summed:
                 return False
         return True

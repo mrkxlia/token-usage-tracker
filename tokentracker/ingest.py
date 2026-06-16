@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 
 from tokentracker import db
@@ -46,9 +47,8 @@ def _ingest(
     # dedup は同一 message_id 単位。Claude Code の重複は同一ファイル内に閉じる（実測）ため、
     # 変更ファイルだけを対象にしても畳み込みは成立する。万一クロスファイルで衝突しても
     # UNIQUE(source, message_id) の UPSERT が冪等に解決する。
-    events = parser._dedup(raw)
-    for ev in events:
-        ev.cost_usd = book.compute_cost(ev)
+    # 単価付与は非破壊で行う（入力イベントを変更せず cost_usd を埋めた新インスタンスを作る）。
+    events = [replace(ev, cost_usd=book.compute_cost(ev)) for ev in parser._dedup(raw)]
     n = db.upsert_events(conn, events)
     # 重要: ingest_state はイベント確定後にのみ前進させる。upsert 前にコミットすると、
     # 失敗/中断時に「state だけ進む → 次回スキップ → 取り込み漏れ」が起きる。イベントを先に
